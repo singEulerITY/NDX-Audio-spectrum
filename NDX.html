@@ -1,0 +1,184 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>NDX Audio spectrum</title>
+    <style>
+        body {
+            margin: 0;
+            background: #000;
+            color: #fff;
+            font-family: monospace;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            height: 100vh;
+        }
+        canvas {
+            background: #000;
+            border: 1px solid #333; /* Keep a subtle border for separation */
+            display: block;
+            margin-bottom: 10px;
+        }
+        .analyzer-label {
+            color: #fff;
+            font-size: 1.2em;
+            margin-bottom: 5px;
+        }
+    </style>
+</head>
+<body>
+    <div class="analyzer-label">Left Channel</div>
+    <canvas id="leftAnalyzer" width="800" height="150"></canvas>
+    <div class="analyzer-label">Right Channel</div>
+    <canvas id="rightAnalyzer" width="800" height="150"></canvas>
+    <script>
+        const leftCanvas = document.getElementById('leftAnalyzer');
+        const rightCanvas = document.getElementById('rightAnalyzer');
+        const leftCtx = leftCanvas.getContext('2d');
+        const rightCtx = rightCanvas.getContext('2d');
+        const WIDTH = leftCanvas.width;
+        const HEIGHT = leftCanvas.height;
+
+        const frequencies = [63, 160, 400, 1000, 2500, 6300, 16000];
+        const bandCount = frequencies.length;
+        const barWidth = 40; // Width of each frequency bar
+        const spacing = (WIDTH - (bandCount * barWidth)) / (bandCount + 1); // Spacing between bars
+
+        let leftPeakHold = new Array(bandCount).fill(0);
+        let rightPeakHold = new Array(bandCount).fill(0);
+        const peakDecay = 0.5; // How quickly the peak indicator falls
+
+        // Colors inspired by the Sony Cara Preta look
+        const activeLedColor = '#F00'; // Bright Red for lit LEDs
+        const inactiveLedColor = '#300'; // Dim Red for unlit LEDs (subtle glow)
+        const peakHoldColor = '#FF8C00'; // Orange-Red for peak hold
+
+        async function setupAudio() {
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+                const source = audioCtx.createMediaStreamSource(stream);
+
+                // Use a GainNode to prevent clipping, can also adjust volume
+                const gainNode = audioCtx.createGain();
+                gainNode.gain.value = 1; // Adjust this value if input is too loud/quiet
+                source.connect(gainNode);
+
+                const splitter = audioCtx.createChannelSplitter(2);
+                gainNode.connect(splitter); // Connect gain node to splitter
+
+                const leftAnalyser = audioCtx.createAnalyser();
+                const rightAnalyser = audioCtx.createAnalyser();
+                leftAnalyser.fftSize = 2048; // More bins for finer frequency resolution
+                rightAnalyser.fftSize = 2048;
+
+                // Connect channels to their respective analysers
+                splitter.connect(leftAnalyser, 0);
+                splitter.connect(rightAnalyser, 1);
+
+                const leftFreqData = new Uint8Array(leftAnalyser.frequencyBinCount);
+                const rightFreqData = new Uint8Array(rightAnalyser.frequencyBinCount);
+                const nyquist = audioCtx.sampleRate / 2; // Max frequency in spectrum
+
+                // Function to get the average level for a frequency band
+                function getBandLevel(analyser, freqArray, targetFreq, bandWidth) {
+                    const startIndex = Math.round((targetFreq - bandWidth / 2) / nyquist * freqArray.length);
+                    const endIndex = Math.round((targetFreq + bandWidth / 2) / nyquist * freqArray.length);
+                    let sum = 0;
+                    let count = 0;
+                    for (let i = startIndex; i < endIndex; i++) {
+                        if (freqArray[i] !== undefined) {
+                            sum += freqArray[i];
+                            count++;
+                        }
+                    }
+                    if (count === 0) return 0;
+                    return (sum / count) / 255; // Normalize to 0-1
+                }
+
+
+                function drawAnalyzer(ctx, analyser, freqData, peakHold) {
+                    ctx.clearRect(0, 0, WIDTH, HEIGHT);
+
+                    // Draw the static grid of unlit LEDs (optional, but gives structure)
+                    const ledCount = 15;
+                    const ledHeight = (HEIGHT - 40) / ledCount; // Space for labels at bottom
+
+                    for (let i = 0; i < bandCount; i++) {
+                        const x = spacing + i * (barWidth + spacing);
+
+                        // Draw inactive LEDs first to create the "grid"
+                        for (let j = 0; j < ledCount; j++) {
+                            const y = HEIGHT - 20 - (j + 1) * ledHeight; // Draw from bottom up
+                            ctx.fillStyle = inactiveLedColor;
+                            // Using a path to draw rounded rectangles
+                            ctx.beginPath();
+                            if (ctx.roundRect) { // Check for roundRect support
+                                ctx.roundRect(x, y, barWidth, ledHeight - 2, 2); // rounded corners
+                            } else {
+                                ctx.rect(x, y, barWidth, ledHeight - 2); // Fallback to rect
+                            }
+                            ctx.fill();
+                        }
+
+                        // Get current frequency data
+                        analyser.getByteFrequencyData(freqData);
+                        const level = getBandLevel(analyser, freqData, frequencies[i], frequencies[i] * 0.5); // Use a band width proportional to frequency
+                        const barHeight = level * (HEIGHT - 40);
+
+
+                        // Draw active LEDs on top
+                        const activeLeds = Math.floor(barHeight / ledHeight);
+                        for (let j = 0; j < activeLeds; j++) {
+                            const y = HEIGHT - 20 - (j + 1) * ledHeight;
+                            ctx.fillStyle = activeLedColor;
+                             ctx.beginPath();
+                            if (ctx.roundRect) {
+                                ctx.roundRect(x, y, barWidth, ledHeight - 2, 2);
+                            } else {
+                                ctx.rect(x, y, barWidth, ledHeight - 2);
+                            }
+                            ctx.fill();
+                        }
+
+                        // Update and draw peak hold
+                        if (barHeight > peakHold[i]) {
+                            peakHold[i] = barHeight;
+                        } else {
+                            peakHold[i] -= peakDecay;
+                            if (peakHold[i] < 0) peakHold[i] = 0;
+                        }
+
+                        ctx.fillStyle = peakHoldColor;
+                        const peakY = HEIGHT - 20 - peakHold[i] - 4; // Adjust peak position for visual alignment
+                        ctx.fillRect(x, peakY, barWidth, 4); // Draw the peak hold line
+
+                        // Draw frequency labels
+                        ctx.fillStyle = '#fff';
+                        ctx.font = '10px monospace';
+                        ctx.textAlign = 'center';
+                        const label = frequencies[i] >= 1000 ? (frequencies[i] / 1000) + 'k' : frequencies[i];
+                        ctx.fillText(label, x + barWidth / 2, HEIGHT - 5); // Adjust label Y position
+                    }
+                }
+
+                function draw() {
+                    requestAnimationFrame(draw);
+                    // No need to call getByteFrequencyData here, it's done inside drawAnalyzer for freshness
+                    drawAnalyzer(leftCtx, leftAnalyser, leftFreqData, leftPeakHold);
+                    drawAnalyzer(rightCtx, rightAnalyser, rightFreqData, rightPeakHold);
+                }
+
+                draw(); // Start the animation loop
+            } catch (err) {
+                console.error('Error accessing microphone:', err);
+                alert('Could not access microphone. Please ensure it is connected and allowed.');
+            }
+        }
+
+        setupAudio();
+    </script>
+</body>
+</html>
